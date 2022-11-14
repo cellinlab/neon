@@ -131,7 +131,7 @@ jobs:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
       POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 15
       TEST_OUTPUT: /tmp/test_output
       BUILD_TYPE: remote
       SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || ( github.ref == 'refs/heads/main' ) }}

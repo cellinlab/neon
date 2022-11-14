@@ -23,7 +23,7 @@ jobs:
     runs-on: [ ubuntu-latest ]
 
     env:
-      DEFAULT_PG_VERSION: 14
+      DEFAULT_PG_VERSION: 15
       TEST_OUTPUT: /tmp/test_output
 
     steps:
