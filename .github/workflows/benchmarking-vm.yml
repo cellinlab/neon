@@ -1,0 +1,229 @@
+name: Benchmarking
+
+on:
+  push:
+    branches:
+      - "bayandin/test"
+
+  workflow_dispatch:
+    inputs:
+      region_id:
+        description: 'Use a particular region. If not set the default region will be used'
+        required: false
+        default: 'aws-us-east-2'
+      save_perf_report:
+        type: boolean
+        description: 'Publish perf report or not. If not set, the report is published only for the main branch'
+        required: false
+
+defaults:
+  run:
+    shell: bash -euxo pipefail {0}
+
+concurrency:
+  # Allow only one workflow per any non-`main` branch.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref == 'refs/heads/main' && github.sha || 'anysha' }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        autoscaling: [ "[1,1]", "[2,2]" ]
+
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "300"
+      TEST_PG_BENCH_SCALES_MATRIX: "10,100"
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || true }}
+      PLATFORM: neon-captest-vm-${{ matrix.autoscaling }}
+
+    runs-on: [ self-hosted, us-east-2, x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Create Neon Project
+      id: create-neon-project
+      uses: ./.github/actions/neon-project-create
+      with:
+        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        provisioner: k8s-neonvm
+        autoscaling: ${{ matrix.autoscaling }}
+
+    - name: Run benchmark
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        # Set --sparse-ordering option of pytest-order plugin
+        # to ensure tests are running in order of appears in the file.
+        # It's important for test_perf_pgbench.py::test_pgbench_remote_* tests
+        extra_params: -m remote_cluster --sparse-ordering --timeout 5400 --ignore test_runner/performance/test_perf_olap.py
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Delete Neon Project
+      if: ${{ always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Create Allure report
+      if: success() || failure()
+      uses: ./.github/actions/allure-report
+      with:
+        action: generate
+        build_type: ${{ env.BUILD_TYPE }}
+
+  pgbench-compare:
+    if: success() || failure()
+    needs: [ bench ]
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [ neon-captest-vm ]
+        db_size: [ 10gb ]
+        autoscaling: [ "[1,1]" ]
+        runner: [ us-east-2 ]
+        include:
+          - platform: neon-captest-vm
+            db_size: 10gb
+            autoscaling: "[2,2]"
+            runner: us-east-2
+
+    env:
+      TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
+      TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
+      POSTGRES_DISTRIB_DIR: /tmp/neon/pg_install
+      DEFAULT_PG_VERSION: 14
+      TEST_OUTPUT: /tmp/test_output
+      BUILD_TYPE: remote
+      SAVE_PERF_REPORT: ${{ github.event.inputs.save_perf_report || true }}
+      PLATFORM: ${{ matrix.platform }}-${{ matrix.autoscaling }}
+
+    runs-on: [ self-hosted, "${{ matrix.runner }}", x64 ]
+    container:
+      image: 369495373322.dkr.ecr.eu-central-1.amazonaws.com/rust:pinned
+      options: --init
+
+    timeout-minutes: 360 # 6h
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Download Neon artifact
+      uses: ./.github/actions/download
+      with:
+        name: neon-${{ runner.os }}-release-artifact
+        path: /tmp/neon/
+        prefix: latest
+
+    - name: Add Postgres binaries to PATH
+      run: |
+        ${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin/pgbench --version
+        echo "${POSTGRES_DISTRIB_DIR}/v${DEFAULT_PG_VERSION}/bin" >> $GITHUB_PATH
+
+    - name: Create Neon Project
+      id: create-neon-project
+      uses: ./.github/actions/neon-project-create
+      with:
+        region_id: ${{ github.event.inputs.region_id || 'aws-us-east-2' }}
+        postgres_version: ${{ env.DEFAULT_PG_VERSION }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+        provisioner: k8s-neonvm
+        autoscaling: ${{ matrix.autoscaling }}
+
+    - name: Set up Connection String
+      id: set-up-connstr
+      run: |
+        echo "connstr=${CONNSTR}" >> $GITHUB_OUTPUT
+
+        psql ${CONNSTR} -c "SELECT version();"
+      env:
+        CONNSTR: ${{ steps.create-neon-project.outputs.dsn }}
+
+    - name: Set database options
+      run: |
+        DB_NAME=$(psql ${BENCHMARK_CONNSTR} --no-align --quiet -t -c "SELECT current_database()")
+
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET enable_seqscan_prefetch=on"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET effective_io_concurrency=32"
+        psql ${BENCHMARK_CONNSTR} -c "ALTER DATABASE ${DB_NAME} SET maintenance_io_concurrency=32"
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+
+    - name: Benchmark init
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_init
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Benchmark simple-update
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_simple_update
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Benchmark select-only
+      uses: ./.github/actions/run-python-test-set
+      with:
+        build_type: ${{ env.BUILD_TYPE }}
+        test_selection: performance
+        run_in_parallel: false
+        save_perf_report: ${{ env.SAVE_PERF_REPORT }}
+        extra_params: -m remote_cluster --timeout 21600 -k test_pgbench_remote_select_only
+      env:
+        BENCHMARK_CONNSTR: ${{ steps.set-up-connstr.outputs.connstr }}
+        VIP_VAP_ACCESS_TOKEN: "${{ secrets.VIP_VAP_ACCESS_TOKEN }}"
+        PERF_TEST_RESULT_CONNSTR: "${{ secrets.PERF_TEST_RESULT_CONNSTR }}"
+
+    - name: Delete Neon Project
+      if: ${{ steps.create-neon-project.outputs.project_id && always() }}
+      uses: ./.github/actions/neon-project-delete
+      with:
+        project_id: ${{ steps.create-neon-project.outputs.project_id }}
+        api_key: ${{ secrets.NEON_STAGING_API_KEY }}
+
+    - name: Create Allure report
+      if: success() || failure()
+      uses: ./.github/actions/allure-report
+      with:
+        action: generate
+        build_type: ${{ env.BUILD_TYPE }}

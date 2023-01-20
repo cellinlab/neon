@@ -14,6 +14,12 @@ inputs:
   api_host:
     desctiption: 'Neon API host'
     default: console.stage.neon.tech
+  provisioner:
+    desctiption: 'k8s-pod or k8s-neonvm'
+    default: "k8s-pod"
+  autoscaling:
+    desctiption: 'Autoscaling min/max compute units'
+    default: "[0,1]"
 
 outputs:
   dsn:
@@ -31,20 +37,34 @@ runs:
       # A shell without `set -x` to not to expose password/dsn in logs
       shell: bash -euo pipefail {0}
       run: |
+        request="{
+          \"project\": {
+            \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
+            \"pg_version\": ${POSTGRES_VERSION},
+            \"region_id\": \"${REGION_ID}\",
+            \"settings\": { }
+          }
+        }"
+
+        if [ "${PROVISIONER}" == "k8s-neonvm" ]; then
+          project_extra="{
+            \"provisioner\": \"k8s-neonvm\",
+            \"autoscaling_limit_min_cu\": ${MIN_CU},
+            \"autoscaling_limit_max_cu\": ${MAX_CU}
+          }"
+        else
+          project_extra="{}"
+        fi
+
+        request=$(echo $request | jq ".project |= . + ${project_extra}")
+
         project=$(curl \
           "https://${API_HOST}/api/v2/projects" \
           --fail \
           --header "Accept: application/json" \
           --header "Content-Type: application/json" \
           --header "Authorization: Bearer ${API_KEY}" \
-          --data "{
-            \"project\": {
-              \"name\": \"Created by actions/neon-project-create; GITHUB_RUN_ID=${GITHUB_RUN_ID}\",
-              \"pg_version\": ${POSTGRES_VERSION},
-              \"region_id\": \"${REGION_ID}\",
-              \"settings\": { }
-            }
-          }")
+          --data "${request}")
 
         # Mask password
         echo "::add-mask::$(echo $project | jq --raw-output '.roles[] | select(.name != "web_access") | .password')"
@@ -62,3 +82,6 @@ runs:
         API_KEY: ${{ inputs.api_key }}
         REGION_ID: ${{ inputs.region_id }}
         POSTGRES_VERSION: ${{ inputs.postgres_version }}
+        PROVISIONER: ${{ inputs.provisioner }}
+        MIN_CU: ${{ fromJSON(inputs.autoscaling)[0] }}
+        MAX_CU: ${{ fromJSON(inputs.autoscaling)[1] }}
