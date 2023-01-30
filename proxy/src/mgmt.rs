@@ -1,3 +1,14 @@
+//!
+//! This provides a listener for connections using the libpq protocol, for the
+//! purposes of "kick callback" from proxy, for link authentication.
+//!
+//! The protocol is the libpq protocol, but the only "query" we accept is a
+//! JSON document. The JSON document is a KickSession serialized to JSON.
+//!
+//! This is considered legacy now. The preferred way to deliver "kick
+//! callbacks" is now via the HTTP API. See `server.rs`. Once the control
+//! plane has switched to using the HTTP API, this can be removed.
+
 use crate::{
     auth,
     console::messages::{DatabaseInfo, KickSession},
@@ -58,7 +69,6 @@ fn handle_connection(socket: TcpStream) -> Result<(), QueryError> {
 /// A message received by `mgmt` when a compute node is ready.
 pub type ComputeReady = Result<DatabaseInfo, String>;
 
-// TODO: replace with an http-based protocol.
 struct MgmtHandler;
 impl postgres_backend::Handler for MgmtHandler {
     fn process_query(&mut self, pgb: &mut PostgresBackend, query: &str) -> Result<(), QueryError> {

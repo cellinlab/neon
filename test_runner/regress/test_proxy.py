@@ -25,15 +25,23 @@ def test_password_hack(static_proxy: NeonProxy):
 
 
 @pytest.mark.asyncio
-async def test_psql_session_id(vanilla_pg: VanillaPostgres, link_proxy: NeonProxy):
-
+@pytest.mark.parametrize("use_legacy_mgmt_api", [True, False])
+async def test_psql_session_id(
+    vanilla_pg: VanillaPostgres, link_proxy: NeonProxy, use_legacy_mgmt_api: bool
+):
     psql = await PSQL(host=link_proxy.host, port=link_proxy.proxy_port).run("select 42")
 
     base_uri = link_proxy.link_auth_uri
     link = await NeonProxy.find_auth_link(base_uri, psql)
 
     psql_session_id = NeonProxy.get_session_id(base_uri, link)
-    await NeonProxy.activate_link_auth(vanilla_pg, link_proxy, psql_session_id)
+    await NeonProxy.activate_link_auth(
+        vanilla_pg,
+        link_proxy,
+        psql_session_id,
+        create_user=True,
+        use_legacy_mgmt_api=use_legacy_mgmt_api,
+    )
 
     assert psql.stdout is not None
     out = (await psql.stdout.read()).decode("utf-8").strip()
