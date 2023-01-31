@@ -1,4 +1,4 @@
-name: Benchmarking
+name: Benchmarking VM
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        autoscaling: [ "[1,1]", "[2,2]" ]
+        autoscaling: [ "[1,2]", "[2,2]" ]
 
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "300"
@@ -106,14 +106,13 @@ jobs:
       matrix:
         platform: [ neon-captest-vm ]
         db_size: [ 10gb ]
-        autoscaling: [ "[1,1]" ]
+        autoscaling: [ "[1,2]" ]
         runner: [ us-east-2 ]
         include:
           - platform: neon-captest-vm
             db_size: 10gb
             autoscaling: "[2,2]"
             runner: us-east-2
-
     env:
       TEST_PG_BENCH_DURATIONS_MATRIX: "60m"
       TEST_PG_BENCH_SCALES_MATRIX: ${{ matrix.db_size }}
