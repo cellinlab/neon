@@ -2723,6 +2723,7 @@ name = "pq_proto"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "byteorder",
  "bytes",
  "pin-project-lite",
  "postgres-protocol",
@@ -3282,15 +3283,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d194b56d58803a43635bdc398cd17e383d6f71f9182b9a192c127ca42494a59b"
 dependencies = [
  "base64 0.21.0",
-]
-
-[[package]]
-name = "rustls-split"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78802c9612b4689d207acff746f38132ca1b12dadb55d471aa5f10fd580f47d3"
-dependencies = [
- "rustls",
 ]
 
 [[package]]
@@ -4513,6 +4505,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "criterion",
+ "futures",
  "git-version",
  "heapless",
  "hex",
@@ -4527,7 +4520,6 @@ dependencies = [
  "routerify",
  "rustls",
  "rustls-pemfile",
- "rustls-split",
  "sentry",
  "serde",
  "serde_json",
@@ -4538,6 +4530,8 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tokio",
+ "tokio-postgres",
+ "tokio-postgres-rustls",
  "tokio-rustls",
  "tracing",
  "tracing-subscriber",
@@ -4848,7 +4842,6 @@ dependencies = [
  "either",
  "fail",
  "futures",
- "futures-channel",
  "futures-executor",
  "futures-util",
  "hashbrown 0.12.3",
