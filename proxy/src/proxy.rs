@@ -133,10 +133,14 @@ pub async fn handle_ws_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
-    cancel_map
-        .with_session(|session| client.connect_to_db(session, true))
-        .await
+    let client = Client::new(
+        stream,
+        creds,
+        &params,
+        session_id,
+        cancel_map.new_session()?,
+    );
+    client.connect_to_db(true).await
 }
 
 async fn handle_client(
@@ -171,10 +175,14 @@ async fn handle_client(
         async { result }.or_else(|e| stream.throw_error(e)).await?
     };
 
-    let client = Client::new(stream, creds, &params, session_id);
-    cancel_map
-        .with_session(|session| client.connect_to_db(session, false))
-        .await
+    let client = Client::new(
+        stream,
+        creds,
+        &params,
+        session_id,
+        cancel_map.new_session()?,
+    );
+    client.connect_to_db(false).await
 }
 
 /// Establish a (most probably, secure) connection with the client.
@@ -380,6 +388,8 @@ struct Client<'a, S> {
     params: &'a StartupMessageParams,
     /// Unique connection ID.
     session_id: uuid::Uuid,
+
+    session: cancellation::Session<'a>,
 }
 
 impl<'a, S> Client<'a, S> {
@@ -389,28 +399,27 @@ impl<'a, S> Client<'a, S> {
         creds: auth::BackendType<'a, auth::ClientCredentials<'a>>,
         params: &'a StartupMessageParams,
         session_id: uuid::Uuid,
+        session: cancellation::Session<'a>,
     ) -> Self {
         Self {
             stream,
             creds,
             params,
             session_id,
+            session,
         }
     }
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin> Client<'_, S> {
     /// Let the client authenticate and connect to the designated compute node.
-    async fn connect_to_db(
-        self,
-        session: cancellation::Session<'_>,
-        use_cleartext_password_flow: bool,
-    ) -> anyhow::Result<()> {
+    async fn connect_to_db(self, use_cleartext_password_flow: bool) -> anyhow::Result<()> {
         let Self {
             mut stream,
             mut creds,
             params,
             session_id,
+            session,
         } = self;
 
         let extra = console::ConsoleReqExtra {
