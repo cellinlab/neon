@@ -35,9 +35,6 @@ pub struct ClientCredentials<'a> {
     pub dbname: &'a str,
     // TODO: this is a severe misnomer! We should think of a new name ASAP.
     pub project: Option<Cow<'a, str>>,
-    /// If `True`, we'll use the old cleartext password flow. This is used for
-    /// websocket connections, which want to minimize the number of round trips.
-    pub use_cleartext_password_flow: bool,
 }
 
 impl ClientCredentials<'_> {
@@ -52,7 +49,6 @@ impl<'a> ClientCredentials<'a> {
         params: &'a StartupMessageParams,
         sni: Option<&str>,
         common_name: Option<&str>,
-        use_cleartext_password_flow: bool,
     ) -> Result<Self, ClientCredsParseError> {
         use ClientCredsParseError::*;
 
@@ -102,7 +98,6 @@ impl<'a> ClientCredentials<'a> {
             user = user,
             dbname = dbname,
             project = project.as_deref(),
-            use_cleartext_password_flow = use_cleartext_password_flow,
             "credentials"
         );
 
@@ -110,7 +105,6 @@ impl<'a> ClientCredentials<'a> {
             user,
             dbname,
             project,
-            use_cleartext_password_flow,
         })
     }
 }
@@ -137,7 +131,7 @@ mod tests {
         let options = StartupMessageParams::new([("user", "john_doe")]);
 
         // TODO: check that `creds.dbname` is None.
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
 
         Ok(())
@@ -147,7 +141,7 @@ mod tests {
     fn parse_missing_project() -> anyhow::Result<()> {
         let options = StartupMessageParams::new([("user", "john_doe"), ("database", "world")]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project, None);
@@ -162,7 +156,7 @@ mod tests {
         let sni = Some("foo.localhost");
         let common_name = Some("localhost");
 
-        let creds = ClientCredentials::parse(&options, sni, common_name, false)?;
+        let creds = ClientCredentials::parse(&options, sni, common_name)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project.as_deref(), Some("foo"));
@@ -178,7 +172,7 @@ mod tests {
             ("options", "-ckey=1 project=bar -c geqo=off"),
         ]);
 
-        let creds = ClientCredentials::parse(&options, None, None, false)?;
+        let creds = ClientCredentials::parse(&options, None, None)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project.as_deref(), Some("bar"));
@@ -197,7 +191,7 @@ mod tests {
         let sni = Some("baz.localhost");
         let common_name = Some("localhost");
 
-        let creds = ClientCredentials::parse(&options, sni, common_name, false)?;
+        let creds = ClientCredentials::parse(&options, sni, common_name)?;
         assert_eq!(creds.user, "john_doe");
         assert_eq!(creds.dbname, "world");
         assert_eq!(creds.project.as_deref(), Some("baz"));
@@ -216,8 +210,7 @@ mod tests {
         let sni = Some("second.localhost");
         let common_name = Some("localhost");
 
-        let err =
-            ClientCredentials::parse(&options, sni, common_name, false).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
         match err {
             InconsistentProjectNames { domain, option } => {
                 assert_eq!(option, "first");
@@ -234,8 +227,7 @@ mod tests {
         let sni = Some("project.localhost");
         let common_name = Some("example.com");
 
-        let err =
-            ClientCredentials::parse(&options, sni, common_name, false).expect_err("should fail");
+        let err = ClientCredentials::parse(&options, sni, common_name).expect_err("should fail");
         match err {
             InconsistentSni { sni, cn } => {
                 assert_eq!(sni, "project.localhost");
