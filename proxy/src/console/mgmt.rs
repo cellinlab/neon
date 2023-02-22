@@ -37,16 +37,12 @@ pub async fn task_main(listener: TcpListener) -> anyhow::Result<()> {
     }
 
     loop {
-        let (socket, peer_addr) = listener
-            .accept()
-            .await
-            .context("failed to accept a new client")?;
+        let (socket, peer_addr) = listener.accept().await?;
         info!("accepted connection from {peer_addr}");
 
         socket
             .set_nodelay(true)
             .context("failed to set client socket option")?;
-        let peer_addr = socket.peer_addr()?;
 
         tokio::task::spawn(async move {
             let span = info_span!("mgmt", peer = %peer_addr);
