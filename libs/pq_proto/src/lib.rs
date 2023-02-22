@@ -26,7 +26,6 @@ pub const TEXT_OID: Oid = 25;
 
 #[derive(Debug)]
 pub enum FeMessage {
-    StartupPacket(FeStartupPacket),
     // Simple query.
     Query(Bytes),
     // Extended query protocol.
@@ -287,7 +286,7 @@ impl FeStartupPacket {
     /// Read and parse startup message from the `buf` input buffer. It is
     /// different from [`FeMessage::parse`] because startup messages don't have
     /// message type byte; otherwise, its comments apply.
-    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeMessage>, ProtocolError> {
+    pub fn parse(buf: &mut BytesMut) -> Result<Option<FeStartupPacket>, ProtocolError> {
         const MAX_STARTUP_PACKET_LENGTH: usize = 10000;
         const RESERVED_INVALID_MAJOR_VERSION: u32 = 1234;
         const CANCEL_REQUEST_CODE: u32 = 5678;
@@ -385,7 +384,7 @@ impl FeStartupPacket {
                 }
             }
         };
-        Ok(Some(FeMessage::StartupPacket(message)))
+        Ok(Some(message))
     }
 }
 

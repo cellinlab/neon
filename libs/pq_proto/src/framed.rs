@@ -45,9 +45,6 @@ pub struct Framed<S> {
     stream: S,
     read_buf: BytesMut,
     write_buf: BytesMut,
-    // Have we already decoded startup message? All further should start with
-    // message type byte then.
-    startup_read: bool,
 }
 
 impl<S> Framed<S> {
@@ -56,7 +53,6 @@ impl<S> Framed<S> {
             stream,
             read_buf: BytesMut::with_capacity(INITIAL_CAPACITY),
             write_buf: BytesMut::with_capacity(INITIAL_CAPACITY),
-            startup_read: false,
         }
     }
 
@@ -82,14 +78,19 @@ impl<S> Framed<S> {
             stream,
             read_buf: self.read_buf,
             write_buf: self.write_buf,
-            startup_read: self.startup_read,
         })
     }
 }
 
 impl<S: AsyncRead + Unpin> Framed<S> {
+    pub async fn read_startup_message(
+        &mut self,
+    ) -> Result<Option<FeStartupPacket>, ConnectionError> {
+        read_message(&mut self.stream, &mut self.read_buf, FeStartupPacket::parse).await
+    }
+
     pub async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
-        read_message(&mut self.stream, &mut self.read_buf, &mut self.startup_read).await
+        read_message(&mut self.stream, &mut self.read_buf, FeMessage::parse).await
     }
 }
 
@@ -120,7 +121,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Framed<S> {
         let reader = FramedReader {
             stream: read_half,
             read_buf: self.read_buf,
-            startup_read: self.startup_read,
         };
         let writer = FramedWriter {
             stream: write_half,
@@ -135,7 +135,6 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Framed<S> {
             stream: reader.stream.unsplit(writer.stream),
             read_buf: reader.read_buf,
             write_buf: writer.write_buf,
-            startup_read: reader.startup_read,
         }
     }
 }
@@ -144,14 +143,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Framed<S> {
 pub struct FramedReader<S> {
     stream: S,
     read_buf: BytesMut,
-    // Have we already decoded startup message? All further should start with
-    // message type byte then.
-    startup_read: bool,
 }
 
 impl<S: AsyncRead + Unpin> FramedReader<S> {
     pub async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
-        read_message(&mut self.stream, &mut self.read_buf, &mut self.startup_read).await
+        read_message(&mut self.stream, &mut self.read_buf, FeMessage::parse).await
     }
 }
 
@@ -190,13 +186,19 @@ impl<S: AsyncWrite + Unpin> FramedWriter<S> {
 /// don't have remaining data in the buffer. This function is cancellation safe:
 /// you can drop future which is not yet complete and finalize reading message
 /// with the next call.
-async fn read_message<S: AsyncRead + Unpin>(
+///
+/// Parametrized to allow reading startup or usual message, having different
+/// format.
+async fn read_message<S: AsyncRead + Unpin, M, P>(
     stream: &mut S,
     read_buf: &mut BytesMut,
-    startup_read: &mut bool,
-) -> Result<Option<FeMessage>, ConnectionError> {
+    parse: P,
+) -> Result<Option<M>, ConnectionError>
+where
+    P: Fn(&mut BytesMut) -> Result<Option<M>, ProtocolError>,
+{
     loop {
-        if let Some(msg) = decode(read_buf, startup_read)? {
+        if let Some(msg) = parse(read_buf)? {
             return Ok(Some(msg));
         }
         // If we can't build a frame yet, try to read more data and try again.
@@ -215,23 +217,6 @@ async fn read_message<S: AsyncRead + Unpin>(
             }
         }
     }
-}
-
-/// Try to decode single message.
-fn decode(
-    src: &mut BytesMut,
-    startup_read: &mut bool,
-) -> Result<Option<FeMessage>, ConnectionError> {
-    let msg = if !*startup_read {
-        let msg = FeStartupPacket::parse(src);
-        if let Ok(Some(FeMessage::StartupPacket(FeStartupPacket::StartupMessage { .. }))) = msg {
-            *startup_read = true;
-        }
-        msg?
-    } else {
-        FeMessage::parse(src)?
-    };
-    Ok(msg)
 }
 
 async fn flush<S: AsyncWrite + Unpin>(

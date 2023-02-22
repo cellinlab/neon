@@ -99,9 +99,11 @@ pub trait Handler {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub enum ProtoState {
     Initialization,
-    // Encryption handshake is done; waiting for encrypted Startup message.
+    /// Encryption handshake is done; waiting for encrypted Startup message.
     Encrypted,
+    /// Waiting for password (auth token).
     Authentication,
+    /// Performed handshake and auth, ReadyForQuery is issued.
     Established,
     Closed,
 }
@@ -197,6 +199,16 @@ enum MaybeWriteOnly {
 }
 
 impl MaybeWriteOnly {
+    async fn read_startup_message(&mut self) -> Result<Option<FeStartupPacket>, ConnectionError> {
+        match self {
+            MaybeWriteOnly::Full(framed) => framed.read_startup_message().await,
+            MaybeWriteOnly::WriteOnly(_) => {
+                Err(io::Error::new(ErrorKind::Other, "reading from write only half").into())
+            }
+            MaybeWriteOnly::Broken => panic!("IO on invalid MaybeWriteOnly"),
+        }
+    }
+
     async fn read_message(&mut self) -> Result<Option<FeMessage>, ConnectionError> {
         match self {
             MaybeWriteOnly::Full(framed) => framed.read_message().await,
@@ -380,28 +392,7 @@ impl PostgresBackend {
                 return Ok(())
             },
 
-            result = async {
-                while self.state < ProtoState::Established {
-                    if let Some(msg) = self.read_message().await? {
-                        trace!("got message {msg:?} during handshake");
-
-                        match self.process_handshake_message(handler, msg).await? {
-                            ProcessMsgResult::Continue => {
-                                self.flush().await?;
-                                continue;
-                            }
-                            ProcessMsgResult::Break => {
-                                trace!("postgres backend to {:?} exited during handshake", self.peer_addr);
-                                return Ok(());
-                            }
-                        }
-                    } else {
-                        trace!("postgres backend to {:?} exited during handshake", self.peer_addr);
-                        return Ok(());
-                    }
-                }
-                Ok::<(), QueryError>(())
-            } => {
+            result = self.handshake(handler) => {
                 // Handshake complete.
                 result?;
             }
@@ -508,103 +499,145 @@ impl PostgresBackend {
         }
     }
 
-    async fn process_handshake_message(
-        &mut self,
-        handler: &mut impl Handler,
-        msg: FeMessage,
-    ) -> Result<ProcessMsgResult, QueryError> {
-        assert!(self.state < ProtoState::Established);
-        let have_tls = self.tls_config.is_some();
-        match msg {
-            FeMessage::StartupPacket(m) => {
-                match m {
-                    FeStartupPacket::SslRequest => {
-                        debug!("SSL requested");
-
-                        self.write_message_flush(&BeMessage::EncryptionResponse(have_tls))
-                            .await?;
-
-                        if have_tls {
-                            self.start_tls().await?;
-                            self.state = ProtoState::Encrypted;
-                        }
-                    }
-                    FeStartupPacket::GssEncRequest => {
-                        debug!("GSS requested");
-                        self.write_message_flush(&BeMessage::EncryptionResponse(false))
-                            .await?;
-                    }
-                    FeStartupPacket::StartupMessage { .. } => {
-                        if have_tls && !matches!(self.state, ProtoState::Encrypted) {
-                            self.write_message_flush(&BeMessage::ErrorResponse(
-                                "must connect with TLS",
-                                None,
-                            ))
-                            .await?;
-                            return Err(QueryError::Other(anyhow::anyhow!(
-                                "client did not connect with TLS"
-                            )));
-                        }
-
-                        // NB: startup() may change self.auth_type -- we are using that in proxy code
-                        // to bypass auth for new users.
-                        handler.startup(self, &m)?;
-
-                        match self.auth_type {
-                            AuthType::Trust => {
-                                self.write_message(&BeMessage::AuthenticationOk)?
-                                    .write_message(&BeMessage::CLIENT_ENCODING)?
-                                    .write_message(&BeMessage::INTEGER_DATETIMES)?
-                                    // The async python driver requires a valid server_version
-                                    .write_message(&BeMessage::server_version("14.1"))?
-                                    .write_message(&BeMessage::ReadyForQuery)?;
-                                self.state = ProtoState::Established;
-                            }
-                            AuthType::NeonJWT => {
-                                self.write_message(&BeMessage::AuthenticationCleartextPassword)?;
-                                self.state = ProtoState::Authentication;
-                            }
-                        }
-                    }
-                    FeStartupPacket::CancelRequest { .. } => {
-                        self.state = ProtoState::Closed;
-                        return Ok(ProcessMsgResult::Break);
-                    }
+    /// Perform handshake with the client, transitioning to Established.
+    /// In case of EOF during handshake logs this, sets state to Closed and returns Ok(()).
+    async fn handshake(&mut self, handler: &mut impl Handler) -> Result<(), QueryError> {
+        while self.state < ProtoState::Authentication {
+            match self.framed.read_startup_message().await? {
+                Some(msg) => {
+                    self.process_startup_message(handler, msg).await?;
                 }
-            }
-
-            FeMessage::PasswordMessage(m) => {
-                trace!("got password message '{:?}'", m);
-
-                assert!(self.state == ProtoState::Authentication);
-
-                match self.auth_type {
-                    AuthType::Trust => unreachable!(),
-                    AuthType::NeonJWT => {
-                        let (_, jwt_response) = m.split_last().context("protocol violation")?;
-
-                        if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
-                            self.write_message(&BeMessage::ErrorResponse(
-                                &e.to_string(),
-                                Some(e.pg_error_code()),
-                            ))?;
-                            return Err(e);
-                        }
-                    }
+                None => {
+                    trace!(
+                        "postgres backend to {:?} received EOF during handshake",
+                        self.peer_addr
+                    );
+                    self.close().await;
+                    return Ok(());
                 }
-                self.write_message(&BeMessage::AuthenticationOk)?
-                    .write_message(&BeMessage::CLIENT_ENCODING)?
-                    .write_message(&BeMessage::INTEGER_DATETIMES)?
-                    .write_message(&BeMessage::ReadyForQuery)?;
-                self.state = ProtoState::Established;
-            }
-
-            _ => {
-                self.state = ProtoState::Closed;
-                return Ok(ProcessMsgResult::Break);
             }
         }
-        Ok(ProcessMsgResult::Continue)
+
+        // Perform auth, if needed.
+        if self.state == ProtoState::Authentication {
+            match self.framed.read_message().await? {
+                Some(FeMessage::PasswordMessage(m)) => {
+                    assert!(self.auth_type == AuthType::NeonJWT);
+
+                    let (_, jwt_response) = m.split_last().context("protocol violation")?;
+
+                    if let Err(e) = handler.check_auth_jwt(self, jwt_response) {
+                        self.write_message(&BeMessage::ErrorResponse(
+                            &e.to_string(),
+                            Some(e.pg_error_code()),
+                        ))?;
+                        return Err(e);
+                    }
+
+                    self.write_message(&BeMessage::AuthenticationOk)?
+                        .write_message(&BeMessage::CLIENT_ENCODING)?
+                        .write_message_flush(&BeMessage::ReadyForQuery)
+                        .await?;
+                    self.state = ProtoState::Established;
+                }
+                Some(m) => {
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "Unexpected message {:?} while waiting for handshake",
+                        m
+                    )));
+                }
+                None => {
+                    trace!(
+                        "postgres backend to {:?} received EOF during auth",
+                        self.peer_addr
+                    );
+                    self.close().await;
+                    return Ok(());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Process startup packet:
+    /// - transition to Established if auth type is trust
+    /// - transition to Authentication if auth type is NeonJWT.
+    /// - or perform TLS handshake -- then need to call this again to receive
+    ///   actual startup packet.
+    async fn process_startup_message(
+        &mut self,
+        handler: &mut impl Handler,
+        msg: FeStartupPacket,
+    ) -> Result<(), QueryError> {
+        assert!(self.state < ProtoState::Authentication);
+        let have_tls = self.tls_config.is_some();
+        match msg {
+            FeStartupPacket::SslRequest => {
+                debug!("SSL requested");
+
+                self.write_message_flush(&BeMessage::EncryptionResponse(have_tls))
+                    .await?;
+
+                if have_tls {
+                    self.start_tls().await?;
+                    self.state = ProtoState::Encrypted;
+                }
+            }
+            FeStartupPacket::GssEncRequest => {
+                debug!("GSS requested");
+                self.write_message_flush(&BeMessage::EncryptionResponse(false))
+                    .await?;
+            }
+            FeStartupPacket::StartupMessage { .. } => {
+                if have_tls && !matches!(self.state, ProtoState::Encrypted) {
+                    self.write_message_flush(&BeMessage::ErrorResponse(
+                        "must connect with TLS",
+                        None,
+                    ))
+                    .await?;
+                    return Err(QueryError::Other(anyhow::anyhow!(
+                        "client did not connect with TLS"
+                    )));
+                }
+
+                // NB: startup() may change self.auth_type -- we are using that in proxy code
+                // to bypass auth for new users.
+                handler.startup(self, &msg)?;
+
+                match self.auth_type {
+                    AuthType::Trust => {
+                        self.write_message(&BeMessage::AuthenticationOk)?
+                            .write_message(&BeMessage::CLIENT_ENCODING)?
+                            .write_message(&BeMessage::INTEGER_DATETIMES)?
+                            // The async python driver requires a valid server_version
+                            .write_message(&BeMessage::server_version("14.1"))?
+                            .write_message_flush(&BeMessage::ReadyForQuery)
+                            .await?;
+                        self.state = ProtoState::Established;
+                    }
+                    AuthType::NeonJWT => {
+                        self.write_message_flush(&BeMessage::AuthenticationCleartextPassword)
+                            .await?;
+                        self.state = ProtoState::Authentication;
+                    }
+                }
+            }
+            FeStartupPacket::CancelRequest { .. } => {
+                return Err(QueryError::Other(anyhow::anyhow!(
+                    "Unexpected CancelRequest message during handshake"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Shutdown the stream and set state to Closed.
+    async fn close(&mut self) {
+        if let Err(e) = self.framed.shutdown().await {
+            error!("failed to shutdown stream: {}", e);
+        }
+        self.state = ProtoState::Closed;
     }
 
     async fn process_message(
@@ -618,10 +651,6 @@ impl PostgresBackend {
         assert!(self.state == ProtoState::Established);
 
         match msg {
-            FeMessage::StartupPacket(_) | FeMessage::PasswordMessage(_) => {
-                return Err(QueryError::Other(anyhow::anyhow!("protocol violation")));
-            }
-
             FeMessage::Query(body) => {
                 // remove null terminator
                 let query_string = cstr_to_str(&body)?;
@@ -682,7 +711,10 @@ impl PostgresBackend {
 
             // We prefer explicit pattern matching to wildcards, because
             // this helps us spot the places where new variants are missing
-            FeMessage::CopyData(_) | FeMessage::CopyDone | FeMessage::CopyFail => {
+            FeMessage::CopyData(_)
+            | FeMessage::CopyDone
+            | FeMessage::CopyFail
+            | FeMessage::PasswordMessage(_) => {
                 return Err(QueryError::Other(anyhow::anyhow!(
                     "unexpected message type: {:?}",
                     msg
@@ -723,9 +755,7 @@ impl PostgresBackend {
         }
 
         if let Terminate = &end {
-            if let Err(e) = self.framed.shutdown().await {
-                error!("failed to shutdown stream: {}", e);
-            }
+            self.close().await;
         }
 
         let err_to_send_and_errcode = match &end {

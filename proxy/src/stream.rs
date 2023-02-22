@@ -45,21 +45,11 @@ fn err_connection() -> io::Error {
 impl<S: AsyncRead + Unpin> PqStream<S> {
     /// Receive [`FeStartupPacket`], which is a first packet sent by a client.
     pub async fn read_startup_packet(&mut self) -> io::Result<FeStartupPacket> {
-        // TODO: `FeStartupPacket::read_fut` should return `FeStartupPacket`
-        let msg = self
-            .framed
-            .read_message()
+        self.framed
+            .read_startup_message()
             .await
             .map_err(ConnectionError::into_io_error)?
-            .ok_or_else(err_connection)?;
-
-        match msg {
-            FeMessage::StartupPacket(packet) => Ok(packet),
-            msg => Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("expected startup message, got {:?}", msg),
-            )),
-        }
+            .ok_or_else(err_connection)
     }
 
     async fn read_message(&mut self) -> io::Result<FeMessage> {
