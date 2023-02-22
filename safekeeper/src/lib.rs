@@ -1,9 +1,7 @@
-use regex::Regex;
-use storage_broker::Uri;
-//
 use remote_storage::RemoteStorageConfig;
+use std::path::PathBuf;
 use std::time::Duration;
-use std::{path::PathBuf, thread};
+use storage_broker::Uri;
 
 use utils::id::{NodeId, TenantId, TenantTimelineId};
 
@@ -95,12 +93,4 @@ impl SafeKeeperConf {
             max_offloader_lag_bytes: defaults::DEFAULT_MAX_OFFLOADER_LAG_BYTES,
         }
     }
-}
-
-/// Get unique thread id (Rust internal), with ThreadId removed for shorter printing
-pub fn get_tid() -> u64 {
-    let tids = format!("{:?}", thread::current().id());
-    let r = Regex::new(r"ThreadId\((\d+)\)").unwrap();
-    let caps = r.captures(&tids).unwrap();
-    caps.get(1).unwrap().as_str().parse().unwrap()
 }

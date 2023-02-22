@@ -4,7 +4,7 @@
 //!
 //! It is similar to what tokio_util::codec::Framed with appropriate codec
 //! provides, but `FramedReader` and `FramedWriter` read/write parts can be used
-//! separately without using split from futures::stream::streamExt (which
+//! separately without using split from futures::stream::StreamExt (which
 //! allocates box in polling internally). tokio::io::split is used for splitting
 //! instead. Plus we customize error messages more than a single type for all io
 //! calls.
@@ -94,14 +94,18 @@ impl<S: AsyncRead + Unpin> Framed<S> {
 }
 
 impl<S: AsyncWrite + Unpin> Framed<S> {
+    /// Write next message to the output buffer; doesn't flush.
     pub fn write_message(&mut self, msg: &BeMessage<'_>) -> Result<(), ProtocolError> {
-        write_message(&mut self.write_buf, msg)
+        BeMessage::write(&mut self.write_buf, msg)
     }
 
+    /// Flush out the buffer. This function is cancellation safe: it can be
+    /// interrupted and flushing will be continued in the next call.
     pub async fn flush(&mut self) -> Result<(), io::Error> {
         flush(&mut self.stream, &mut self.write_buf).await
     }
 
+    /// Flush out the buffer and shutdown the stream.
     pub async fn shutdown(&mut self) -> Result<(), io::Error> {
         shutdown(&mut self.stream, &mut self.write_buf).await
     }
@@ -165,14 +169,18 @@ impl<S> FramedWriter<S> {
 }
 
 impl<S: AsyncWrite + Unpin> FramedWriter<S> {
+    /// Write next message to the output buffer; doesn't flush.
     pub fn write_message(&mut self, msg: &BeMessage<'_>) -> Result<(), ProtocolError> {
-        write_message(&mut self.write_buf, msg)
+        BeMessage::write(&mut self.write_buf, msg)
     }
 
+    /// Flush out the buffer. This function is cancellation safe: it can be
+    /// interrupted and flushing will be continued in the next call.
     pub async fn flush(&mut self) -> Result<(), io::Error> {
         flush(&mut self.stream, &mut self.write_buf).await
     }
 
+    /// Flush out the buffer and shutdown the stream.
     pub async fn shutdown(&mut self) -> Result<(), io::Error> {
         shutdown(&mut self.stream, &mut self.write_buf).await
     }
@@ -226,14 +234,6 @@ fn decode(
     Ok(msg)
 }
 
-/// Write next message to the output buffer; doesn't flush.
-fn write_message(write_buf: &mut BytesMut, msg: &BeMessage<'_>) -> Result<(), ProtocolError> {
-    BeMessage::write(write_buf, msg)?;
-    Ok(())
-}
-
-/// Flush out the buffer. This function is cancellation safe: it can be
-/// interrupted and flushing finished in the next call.
 async fn flush<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,
@@ -255,7 +255,6 @@ async fn flush<S: AsyncWrite + Unpin>(
     stream.flush().await
 }
 
-/// Flush out the buffer and shutdown the stream.
 async fn shutdown<S: AsyncWrite + Unpin>(
     stream: &mut S,
     write_buf: &mut BytesMut,

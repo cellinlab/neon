@@ -19,7 +19,10 @@ use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info, trace};
 
 use pq_proto::framed::{ConnectionError, Framed, FramedReader, FramedWriter};
-use pq_proto::{BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_INTERNAL_ERROR};
+use pq_proto::{
+    BeMessage, FeMessage, FeStartupPacket, ProtocolError, SQLSTATE_INTERNAL_ERROR,
+    SQLSTATE_SUCCESSFUL_COMPLETION,
+};
 
 /// An error, occurred during query processing:
 /// either during the connection ([`ConnectionError`]) or before/after it.
@@ -725,8 +728,9 @@ impl PostgresBackend {
             }
         }
 
-        let err_to_send = match &end {
-            ServerInitiated(_) | Other(_) => Some(end.to_string()),
+        let err_to_send_and_errcode = match &end {
+            ServerInitiated(_) => Some((end.to_string(), SQLSTATE_SUCCESSFUL_COMPLETION)),
+            Other(_) => Some((end.to_string(), SQLSTATE_INTERNAL_ERROR)),
             // Note: we should probably close the socket, as
             // CopyFail in duplex copy is unexpected (at least to PG
             // walsender; evidently and per my docs reading client should
@@ -741,12 +745,12 @@ impl PostgresBackend {
             // dropped). Moreover, seems like 'connection' task errors with
             // 'unexpected message from server' when it receives
             // ErrorResponse (anything but CopyData/CopyDone) back.
-            CopyFail => Some(end.to_string()),
+            CopyFail => Some((end.to_string(), SQLSTATE_SUCCESSFUL_COMPLETION)),
             _ => None,
         };
-        if let Some(e) = err_to_send {
+        if let Some((err, errcode)) = err_to_send_and_errcode {
             if let Err(ee) = self
-                .write_message_flush(&BeMessage::ErrorResponse(&e, None))
+                .write_message_flush(&BeMessage::ErrorResponse(&err, Some(errcode)))
                 .await
             {
                 error!("failed to send ErrorResponse: {}", ee);

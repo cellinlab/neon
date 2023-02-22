@@ -304,7 +304,7 @@ impl FeStartupPacket {
         // We shouldn't advance `buf` as probably full message is not there yet,
         // so can't directly use Bytes::get_u32 etc.
         let len = (&buf[0..4]).read_u32::<BigEndian>().unwrap() as usize;
-        if !(8..=MAX_STARTUP_PACKET_LENGTH).contains(&len) {
+        if len < 4 || len > MAX_STARTUP_PACKET_LENGTH {
             return Err(ProtocolError::Protocol(format!(
                 "invalid startup packet message length {}",
                 len
@@ -481,6 +481,7 @@ pub enum BeMessage<'a> {
     CloseComplete,
     // None means column is NULL
     DataRow(&'a [Option<&'a [u8]>]),
+    // None errcode means internal_error will be sent.
     ErrorResponse(&'a str, Option<&'a [u8; 5]>),
     /// Single byte - used in response to SSLRequest/GSSENCRequest.
     EncryptionResponse(bool),
@@ -654,6 +655,7 @@ fn read_cstr(buf: &mut Bytes) -> anyhow::Result<Bytes> {
 }
 
 pub const SQLSTATE_INTERNAL_ERROR: &[u8; 5] = b"XX000";
+pub const SQLSTATE_SUCCESSFUL_COMPLETION: &[u8; 5] = b"00000";
 
 impl<'a> BeMessage<'a> {
     /// Serialize `message` to the given `buf`.

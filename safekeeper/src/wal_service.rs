@@ -3,13 +3,14 @@
 //!   receive WAL from wal_proposer and send it to WAL receivers
 //!
 use anyhow::{Context, Result};
+use nix::unistd::gettid;
 use std::{future, thread};
 use tokio::net::TcpStream;
 use tracing::*;
 use utils::postgres_backend::QueryError;
 
+use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
-use crate::{get_tid, handler::SafekeeperPostgresHandler};
 use utils::postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
@@ -54,7 +55,7 @@ pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {
 /// This is run by `thread_main` above, inside a background thread.
 ///
 fn handle_socket(socket: TcpStream, conf: SafeKeeperConf) -> Result<(), QueryError> {
-    let _enter = info_span!("", tid = ?get_tid()).entered();
+    let _enter = info_span!("", tid = %gettid()).entered();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

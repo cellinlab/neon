@@ -2,7 +2,6 @@
 //! Gets messages from the network, passes them down to consensus module and
 //! sends replies back.
 
-use crate::get_tid;
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::AcceptorProposerMessage;
 use crate::safekeeper::ProposerAcceptorMessage;
@@ -11,6 +10,7 @@ use crate::timeline::Timeline;
 use crate::GlobalTimelines;
 use anyhow::{anyhow, Context};
 use bytes::BytesMut;
+use nix::unistd::gettid;
 use pq_proto::BeMessage;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -223,9 +223,8 @@ impl WalAcceptor {
 
                 let span_ttid = wa.tli.ttid; // satisfy borrow checker
                 runtime.block_on(
-                    wa.run().instrument(
-                        info_span!("WAL acceptor", tid = ?get_tid(), ttid = %span_ttid),
-                    ),
+                    wa.run()
+                        .instrument(info_span!("WAL acceptor", tid = %gettid(), ttid = %span_ttid)),
                 )
             })
             .map_err(anyhow::Error::from)
