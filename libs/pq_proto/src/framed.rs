@@ -5,9 +5,11 @@
 //! It is similar to what tokio_util::codec::Framed with appropriate codec
 //! provides, but `FramedReader` and `FramedWriter` read/write parts can be used
 //! separately without using split from futures::stream::StreamExt (which
-//! allocates box in polling internally). tokio::io::split is used for splitting
+//! allocates box[1] in polling internally). tokio::io::split is used for splitting
 //! instead. Plus we customize error messages more than a single type for all io
 //! calls.
+//!
+//! [1] https://docs.rs/futures-util/0.3.26/src/futures_util/lock/bilock.rs.html#107
 use bytes::{Buf, BytesMut};
 use std::{
     future::Future,
