@@ -55,10 +55,12 @@ impl SafekeeperPostgresHandler {
         pgb.write_message_flush(&BeMessage::CopyBothResponse)
             .await?;
 
-        // Experiments confirm that doing network IO in one (this) thread and
+        // Experiments [1] confirm that doing network IO in one (this) thread and
         // processing with disc IO in another significantly improves
         // performance; we spawn off WalAcceptor thread for message processing
         // to this end.
+        //
+        // [1] https://github.com/neondatabase/neon/pull/1318
         let (msg_tx, msg_rx) = channel(MSG_QUEUE_SIZE);
         let (reply_tx, reply_rx) = channel(REPLY_QUEUE_SIZE);
         let mut acceptor_handle: Option<JoinHandle<anyhow::Result<()>>> = None;

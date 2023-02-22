@@ -98,6 +98,7 @@ pub trait Handler {
 /// XXX: The order of the constructors matters.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd)]
 pub enum ProtoState {
+    /// Nothing happened yet.
     Initialization,
     /// Encryption handshake is done; waiting for encrypted Startup message.
     Encrypted,
@@ -368,6 +369,8 @@ impl PostgresBackend {
         S: Future,
     {
         let ret = self.run_message_loop(handler, shutdown_watcher).await;
+        // socket might be already closed, e.g. if previously received error,
+        // so ignore result.
         self.framed.shutdown().await.ok();
         ret
     }
@@ -716,8 +719,7 @@ impl PostgresBackend {
             | FeMessage::CopyFail
             | FeMessage::PasswordMessage(_) => {
                 return Err(QueryError::Other(anyhow::anyhow!(
-                    "unexpected message type: {:?}",
-                    msg
+                    "unexpected message type: {msg:?}",
                 )));
             }
         }
@@ -761,20 +763,21 @@ impl PostgresBackend {
         let err_to_send_and_errcode = match &end {
             ServerInitiated(_) => Some((end.to_string(), SQLSTATE_SUCCESSFUL_COMPLETION)),
             Other(_) => Some((end.to_string(), SQLSTATE_INTERNAL_ERROR)),
-            // Note: we should probably close the socket, as
-            // CopyFail in duplex copy is unexpected (at least to PG
-            // walsender; evidently and per my docs reading client should
-            // finish it with CopyDone). Note that sync rust-postgres client
-            // (which we don't use anymore) hangs otherwise.
+            // Note: CopyFail in duplex copy is somewhat unexpected (at least to
+            // PG walsender; evidently and per my docs reading client should
+            // finish it with CopyDone). It is not a problem to recover from it
+            // finishing the stream in both directions like we do, but note that
+            // sync rust-postgres client (which we don't use anymore) hangs if
+            // socket is not closed here.
             // https://github.com/sfackler/rust-postgres/issues/755
             // https://github.com/neondatabase/neon/issues/935
             //
-            // Currently, the version of tokio_postgres replication patch we
-            // use sends this when it closes the stream (e.g. pageserver
-            // decided to switch conn to another safekeeper and client gets
-            // dropped). Moreover, seems like 'connection' task errors with
-            // 'unexpected message from server' when it receives
-            // ErrorResponse (anything but CopyData/CopyDone) back.
+            // Currently, the version of tokio_postgres replication patch we use
+            // sends this when it closes the stream (e.g. pageserver decided to
+            // switch conn to another safekeeper and client gets dropped).
+            // Moreover, seems like 'connection' task errors with 'unexpected
+            // message from server' when it receives ErrorResponse (anything but
+            // CopyData/CopyDone) back.
             CopyFail => Some((end.to_string(), SQLSTATE_SUCCESSFUL_COMPLETION)),
             _ => None,
         };
