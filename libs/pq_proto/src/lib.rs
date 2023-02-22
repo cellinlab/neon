@@ -4,7 +4,6 @@
 
 pub mod framed;
 
-use anyhow::{anyhow, bail, ensure, Context, Result};
 use byteorder::{BigEndian, ReadBytesExt};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use postgres_protocol::PG_EPOCH;
@@ -195,14 +194,7 @@ pub enum ProtocolError {
     Protocol(String),
     /// Failed to parse or, (unlikely), serialize a protocol message.
     #[error("Message parse error: {0}")]
-    MessageParse(anyhow::Error),
-}
-
-// Allows to return anyhow error from msg parsing routines, meaning less typing.
-impl From<anyhow::Error> for ProtocolError {
-    fn from(e: anyhow::Error) -> Self {
-        Self::MessageParse(e)
-    }
+    MessageParse(String),
 }
 
 impl ProtocolError {
@@ -328,9 +320,10 @@ impl FeStartupPacket {
         let message = match (req_hi, req_lo) {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                 if msg.remaining() != 8 {
-                    return Err(ProtocolError::MessageParse(anyhow!(
+                    return Err(ProtocolError::MessageParse(
                         "CancelRequest message is malformed, backend PID / secret key missing"
-                    )));
+                            .to_owned(),
+                    ));
                 }
                 FeStartupPacket::CancelRequest(CancelKeyData {
                     backend_pid: msg.get_i32(),
@@ -357,7 +350,11 @@ impl FeStartupPacket {
                 // Parse pairs of null-terminated strings (key, value).
                 // See `postgres: ProcessStartupPacket, build_startup_packet`.
                 let mut tokens = str::from_utf8(&msg)
-                    .context("StartupMessage params: invalid utf-8")?
+                    .map_err(|_e| {
+                        ProtocolError::MessageParse(
+                            "StartupMessage params: invalid utf-8".to_owned(),
+                        )
+                    })?
                     .strip_suffix('\0') // drop packet's own null
                     .ok_or_else(|| {
                         ProtocolError::Protocol(
@@ -389,7 +386,7 @@ impl FeStartupPacket {
 }
 
 impl FeParseMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         // FIXME: the rust-postgres driver uses a named prepared statement
         // for copy_out(). We're not prepared to handle that correctly. For
         // now, just ignore the statement name, assuming that the client never
@@ -398,60 +395,81 @@ impl FeParseMessage {
         let _pstmt_name = read_cstr(&mut buf)?;
         let query_string = read_cstr(&mut buf)?;
         if buf.remaining() < 2 {
-            bail!("Parse message is malformed, nparams missing");
+            return Err(ProtocolError::MessageParse(
+                "Parse message is malformed, nparams missing".to_string(),
+            ));
         }
         let nparams = buf.get_i16();
 
-        ensure!(nparams == 0, "query params not implemented");
+        if nparams != 0 {
+            return Err(ProtocolError::MessageParse(
+                "query params not implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Parse(FeParseMessage { query_string }))
     }
 }
 
 impl FeDescribeMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let kind = buf.get_u8();
         let _pstmt_name = read_cstr(&mut buf)?;
 
         // FIXME: see FeParseMessage::parse
-        ensure!(
-            kind == b'S',
-            "only prepared statemement Describe is implemented"
-        );
+        if kind != b'S' {
+            return Err(ProtocolError::MessageParse(
+                "only prepared statemement Describe is implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Describe(FeDescribeMessage { kind }))
     }
 }
 
 impl FeExecuteMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let portal_name = read_cstr(&mut buf)?;
         if buf.remaining() < 4 {
-            bail!("FeExecuteMessage message is malformed, maxrows missing");
+            return Err(ProtocolError::MessageParse(
+                "FeExecuteMessage message is malformed, maxrows missing".to_string(),
+            ));
         }
         let maxrows = buf.get_i32();
 
-        ensure!(portal_name.is_empty(), "named portals not implemented");
-        ensure!(maxrows == 0, "row limit in Execute message not implemented");
+        if !portal_name.is_empty() {
+            return Err(ProtocolError::MessageParse(
+                "named portals not implemented".to_string(),
+            ));
+        }
+        if maxrows != 0 {
+            return Err(ProtocolError::MessageParse(
+                "row limit in Execute message not implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Execute(FeExecuteMessage { maxrows }))
     }
 }
 
 impl FeBindMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let portal_name = read_cstr(&mut buf)?;
         let _pstmt_name = read_cstr(&mut buf)?;
 
         // FIXME: see FeParseMessage::parse
-        ensure!(portal_name.is_empty(), "named portals not implemented");
+        if !portal_name.is_empty() {
+            return Err(ProtocolError::MessageParse(
+                "named portals not implemented".to_string(),
+            ));
+        }
 
         Ok(FeMessage::Bind(FeBindMessage))
     }
 }
 
 impl FeCloseMessage {
-    fn parse(mut buf: Bytes) -> anyhow::Result<FeMessage> {
+    fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let _kind = buf.get_u8();
         let _pstmt_or_portal_name = read_cstr(&mut buf)?;
 
@@ -637,18 +655,22 @@ fn write_body<R>(buf: &mut BytesMut, f: impl FnOnce(&mut BytesMut) -> R) -> R {
 fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> Result<(), ProtocolError> {
     let bytes = s.as_ref();
     if bytes.contains(&0) {
-        return Err(ProtocolError::MessageParse(anyhow!(
-            "string contains embedded null"
-        )));
+        return Err(ProtocolError::MessageParse(
+            "string contains embedded null".to_owned(),
+        ));
     }
     buf.put_slice(bytes);
     buf.put_u8(0);
     Ok(())
 }
 
-fn read_cstr(buf: &mut Bytes) -> anyhow::Result<Bytes> {
-    let pos = buf.iter().position(|x| *x == 0);
-    let result = buf.split_to(pos.context("missing cstring terminator")?);
+/// Read cstring from buf, advancing it.
+fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
+    let pos = buf
+        .iter()
+        .position(|x| *x == 0)
+        .ok_or_else(|| ProtocolError::MessageParse("missing cstring terminator".to_owned()))?;
+    let result = buf.split_to(pos);
     buf.advance(1); // drop the null terminator
     Ok(result)
 }
@@ -956,7 +978,7 @@ impl ReplicationFeedback {
     // null-terminated string - key,
     // uint32 - value length in bytes
     // value itself
-    pub fn serialize(&self, buf: &mut BytesMut) -> Result<()> {
+    pub fn serialize(&self, buf: &mut BytesMut) {
         buf.put_u8(REPLICATION_FEEDBACK_FIELDS_NUMBER); // # of keys
         buf.put_slice(b"current_timeline_size\0");
         buf.put_i32(8);
@@ -981,7 +1003,6 @@ impl ReplicationFeedback {
         buf.put_slice(b"ps_replytime\0");
         buf.put_i32(8);
         buf.put_i64(timestamp);
-        Ok(())
     }
 
     // Deserialize ReplicationFeedback message
@@ -1049,7 +1070,7 @@ mod tests {
         // because it is rounded up to microseconds during serialization.
         rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
-        rf.serialize(&mut data).unwrap();
+        rf.serialize(&mut data);
 
         let rf_parsed = ReplicationFeedback::parse(data.freeze());
         assert_eq!(rf, rf_parsed);
@@ -1064,7 +1085,7 @@ mod tests {
         // because it is rounded up to microseconds during serialization.
         rf.ps_replytime = *PG_EPOCH + Duration::from_secs(100_000_000);
         let mut data = BytesMut::new();
-        rf.serialize(&mut data).unwrap();
+        rf.serialize(&mut data);
 
         // Add an extra field to the buffer and adjust number of keys
         if let Some(first) = data.first_mut() {
