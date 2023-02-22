@@ -710,7 +710,7 @@ impl<'a> BeMessage<'a> {
 
             BeMessage::AuthenticationSasl(msg) => {
                 buf.put_u8(b'R');
-                write_body(buf, |buf| -> Result<(), ProtocolError> {
+                write_body(buf, |buf| {
                     use BeAuthenticationSaslMessage::*;
                     match msg {
                         Methods(methods) => {
