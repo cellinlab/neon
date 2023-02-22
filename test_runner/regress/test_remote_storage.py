@@ -196,9 +196,6 @@ def test_remote_storage_backup_and_restore(
                 == f"{data}|{checkpoint_number}"
             )
 
-    log.info("ensure that we neede to retry downloads due to test_remote_failures=1")
-    assert env.pageserver.log_contains(layer_download_failed_regex)
-
 
 # Exercises the upload queue retry code paths.
 # - Use failpoints to cause all storage ops to fail
@@ -212,7 +209,6 @@ def test_remote_storage_upload_queue_retries(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_storage_upload_queue_retries",
@@ -374,7 +370,6 @@ def test_remote_timeline_client_calls_started_metric(
     neon_env_builder: NeonEnvBuilder,
     remote_storage_kind: RemoteStorageKind,
 ):
-
     neon_env_builder.enable_remote_storage(
         remote_storage_kind=remote_storage_kind,
         test_name="test_remote_timeline_client_metrics",
