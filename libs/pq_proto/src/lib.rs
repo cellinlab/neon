@@ -194,7 +194,7 @@ pub enum ProtocolError {
     Protocol(String),
     /// Failed to parse or, (unlikely), serialize a protocol message.
     #[error("Message parse error: {0}")]
-    MessageParse(String),
+    BadMessage(String),
 }
 
 impl ProtocolError {
@@ -320,7 +320,7 @@ impl FeStartupPacket {
         let message = match (req_hi, req_lo) {
             (RESERVED_INVALID_MAJOR_VERSION, CANCEL_REQUEST_CODE) => {
                 if msg.remaining() != 8 {
-                    return Err(ProtocolError::MessageParse(
+                    return Err(ProtocolError::BadMessage(
                         "CancelRequest message is malformed, backend PID / secret key missing"
                             .to_owned(),
                     ));
@@ -351,9 +351,7 @@ impl FeStartupPacket {
                 // See `postgres: ProcessStartupPacket, build_startup_packet`.
                 let mut tokens = str::from_utf8(&msg)
                     .map_err(|_e| {
-                        ProtocolError::MessageParse(
-                            "StartupMessage params: invalid utf-8".to_owned(),
-                        )
+                        ProtocolError::BadMessage("StartupMessage params: invalid utf-8".to_owned())
                     })?
                     .strip_suffix('\0') // drop packet's own null
                     .ok_or_else(|| {
@@ -395,14 +393,14 @@ impl FeParseMessage {
         let _pstmt_name = read_cstr(&mut buf)?;
         let query_string = read_cstr(&mut buf)?;
         if buf.remaining() < 2 {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "Parse message is malformed, nparams missing".to_string(),
             ));
         }
         let nparams = buf.get_i16();
 
         if nparams != 0 {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "query params not implemented".to_string(),
             ));
         }
@@ -418,7 +416,7 @@ impl FeDescribeMessage {
 
         // FIXME: see FeParseMessage::parse
         if kind != b'S' {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "only prepared statemement Describe is implemented".to_string(),
             ));
         }
@@ -431,19 +429,19 @@ impl FeExecuteMessage {
     fn parse(mut buf: Bytes) -> Result<FeMessage, ProtocolError> {
         let portal_name = read_cstr(&mut buf)?;
         if buf.remaining() < 4 {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "FeExecuteMessage message is malformed, maxrows missing".to_string(),
             ));
         }
         let maxrows = buf.get_i32();
 
         if !portal_name.is_empty() {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "named portals not implemented".to_string(),
             ));
         }
         if maxrows != 0 {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "row limit in Execute message not implemented".to_string(),
             ));
         }
@@ -459,7 +457,7 @@ impl FeBindMessage {
 
         // FIXME: see FeParseMessage::parse
         if !portal_name.is_empty() {
-            return Err(ProtocolError::MessageParse(
+            return Err(ProtocolError::BadMessage(
                 "named portals not implemented".to_string(),
             ));
         }
@@ -655,7 +653,7 @@ fn write_body<R>(buf: &mut BytesMut, f: impl FnOnce(&mut BytesMut) -> R) -> R {
 fn write_cstr(s: impl AsRef<[u8]>, buf: &mut BytesMut) -> Result<(), ProtocolError> {
     let bytes = s.as_ref();
     if bytes.contains(&0) {
-        return Err(ProtocolError::MessageParse(
+        return Err(ProtocolError::BadMessage(
             "string contains embedded null".to_owned(),
         ));
     }
@@ -669,7 +667,7 @@ fn read_cstr(buf: &mut Bytes) -> Result<Bytes, ProtocolError> {
     let pos = buf
         .iter()
         .position(|x| *x == 0)
-        .ok_or_else(|| ProtocolError::MessageParse("missing cstring terminator".to_owned()))?;
+        .ok_or_else(|| ProtocolError::BadMessage("missing cstring terminator".to_owned()))?;
     let result = buf.split_to(pos);
     buf.advance(1); // drop the null terminator
     Ok(result)
