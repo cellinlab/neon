@@ -7,6 +7,8 @@ use crate::wal_storage::WalReader;
 use crate::GlobalTimelines;
 use anyhow::Context as AnyhowContext;
 use bytes::Bytes;
+use postgres_backend::PostgresBackend;
+use postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
 use postgres_ffi::get_current_timestamp;
 use postgres_ffi::{TimestampTz, MAX_SEND_SIZE};
 use pq_proto::{BeMessage, ReplicationFeedback, WalSndKeepAlive, XLogDataBody};
@@ -18,8 +20,7 @@ use std::time::Duration;
 use tokio::sync::watch::Receiver;
 use tokio::time::timeout;
 use tracing::*;
-use utils::postgres_backend::{CopyStreamHandlerEnd, PostgresBackendReader, QueryError};
-use utils::{bin_ser::BeSer, lsn::Lsn, postgres_backend::PostgresBackend};
+use utils::{bin_ser::BeSer, lsn::Lsn};
 
 // See: https://www.postgresql.org/docs/13/protocol-replication.html
 const HOT_STANDBY_FEEDBACK_TAG_BYTE: u8 = b'h';

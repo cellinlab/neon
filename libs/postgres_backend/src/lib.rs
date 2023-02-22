@@ -851,7 +851,7 @@ pub fn short_error(e: &QueryError) -> String {
     }
 }
 
-pub(super) fn log_query_error(query: &str, e: &QueryError) {
+fn log_query_error(query: &str, e: &QueryError) {
     match e {
         QueryError::Disconnected(ConnectionError::Io(io_error)) => {
             if is_expected_io_error(io_error) {

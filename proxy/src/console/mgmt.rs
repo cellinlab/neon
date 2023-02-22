@@ -4,14 +4,11 @@ use crate::{
 };
 use anyhow::Context;
 use once_cell::sync::Lazy;
+use postgres_backend::{self, AuthType, PostgresBackend, QueryError};
 use pq_proto::{BeMessage, SINGLE_COL_ROWDESC};
 use std::future;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info, info_span};
-use utils::{
-    postgres_backend::QueryError,
-    postgres_backend::{self, AuthType, PostgresBackend},
-};
 
 static CPLANE_WAITERS: Lazy<Waiters<ComputeReady>> = Lazy::new(Default::default);
 

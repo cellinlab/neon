@@ -4,14 +4,14 @@
 //!
 use anyhow::{Context, Result};
 use nix::unistd::gettid;
+use postgres_backend::QueryError;
 use std::{future, thread};
 use tokio::net::TcpStream;
 use tracing::*;
-use utils::postgres_backend::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::SafeKeeperConf;
-use utils::postgres_backend::{AuthType, PostgresBackend};
+use postgres_backend::{AuthType, PostgresBackend};
 
 /// Accept incoming TCP connections and spawn them into a background thread.
 pub fn thread_main(conf: SafeKeeperConf, pg_listener: std::net::TcpListener) {

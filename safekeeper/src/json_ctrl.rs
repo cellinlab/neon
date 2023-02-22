@@ -10,10 +10,10 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use bytes::Bytes;
+use postgres_backend::QueryError;
 use serde::{Deserialize, Serialize};
 use tracing::*;
 use utils::id::TenantTimelineId;
-use utils::postgres_backend::QueryError;
 
 use crate::handler::SafekeeperPostgresHandler;
 use crate::safekeeper::{AcceptorProposerMessage, AppendResponse, ServerInfo};
@@ -23,10 +23,11 @@ use crate::safekeeper::{
 use crate::safekeeper::{SafeKeeperState, Term, TermHistory, TermSwitchEntry};
 use crate::timeline::Timeline;
 use crate::GlobalTimelines;
+use postgres_backend::PostgresBackend;
 use postgres_ffi::encode_logical_message;
 use postgres_ffi::WAL_SEGMENT_SIZE;
 use pq_proto::{BeMessage, RowDescriptor, TEXT_OID};
-use utils::{lsn::Lsn, postgres_backend::PostgresBackend};
+use utils::lsn::Lsn;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendLogicalMessage {

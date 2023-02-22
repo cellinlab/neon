@@ -9,15 +9,15 @@ use crate::auth::check_permission;
 use crate::json_ctrl::{handle_json_ctrl, AppendLogicalMessage};
 
 use crate::{GlobalTimelines, SafeKeeperConf};
+use postgres_backend::QueryError;
+use postgres_backend::{self, PostgresBackend};
 use postgres_ffi::PG_TLI;
 use pq_proto::{BeMessage, FeStartupPacket, RowDescriptor, INT4_OID, TEXT_OID};
 use regex::Regex;
 use utils::auth::{Claims, Scope};
-use utils::postgres_backend::QueryError;
 use utils::{
     id::{TenantId, TenantTimelineId, TimelineId},
     lsn::Lsn,
-    postgres_backend::{self, PostgresBackend},
 };
 
 /// Safekeeper handler of postgres commands
