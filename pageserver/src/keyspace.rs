@@ -14,7 +14,21 @@ pub struct KeySpace {
 
 impl KeySpace {
     /// Return intersection of the specified range with key space. If no intersection is found then returned
-    // range will have end<=start
+    /// range will have end<=start. This method is used by GC to exclude from target range for image coverage
+    /// dropped relations. As far as them are not included in keyspace, no image layers can be created for them
+    /// by compaction task and so GC will not be able to delete containing it layers.
+    ///
+    /// As far as delta layer can be sparse, it may be covered by multiple image layers and contain dropped
+    /// ralation somewhere inside:
+    ///    delta: =======ddddddddddddddd=====
+    ///    image: <---1---><---2---><---3--->
+    /// where ddddd marks key range corresponding to the dropped relation.
+    /// In this case we can not shrink key range and this delta layer can not be reclaimed by GC because
+    /// of lack of image layer 2.
+    /// But delta layer can contain thousands of relation so performing true interscect by splitting key range
+    /// into multiple subranges can produce very larger number of such subranges and make layer coverage test
+    /// very expensive. This is why we just shrink both range boundaries.
+    ///
     pub fn intersect(&self, key_range: &Range<Key>) -> Range<Key> {
         let start = match self
             .ranges
@@ -27,6 +41,7 @@ impl KeySpace {
                     key_range.start
                 } else if index < self.ranges.len() {
                     // exists next range
+                    assert!(self.ranges[index].start > key_range.start);
                     self.ranges[index].start
                 } else {
                     Key::MAX
@@ -44,6 +59,7 @@ impl KeySpace {
                     key_range.end
                 } else if index != 0 {
                     // exists prev range
+                    assert!(self.ranges[index - 1].end < key_range.end);
                     self.ranges[index - 1].end
                 } else {
                     Key::MIN

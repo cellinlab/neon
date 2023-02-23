@@ -3484,23 +3484,24 @@ impl Timeline {
             // the delta layer 2000-3000 depends on it.
             //
             // If some relation is dropped then it doesn't belong to keyspace any more and
-            // compaction will not generate image layers for it. It prevents GC from deleting layers
-            // of this relation. This is why intersect target keyspace with keyspace at the moment of cutoff.
+            // compaction will not generate image layers for it. It prevents GC from deleting layer files
+            // of this relation. This is why we intersect target keyspace with keyspace at the moment of cutoff.
             // If dropped relation is inside key range, then it is not a problem, because generated image layer will
             // cover it.
             //
             let mut key_range = l.get_key_range();
             key_range = keyspace.intersect(&key_range);
 
-            if key_range.is_empty() || // all keys from this layer are dropped before cutoff
+            if !key_range.is_empty() && // all keys from this layer are dropped before cutoff
 				!layers.image_layer_exists(&key_range, &(l.get_lsn_range().end..new_gc_cutoff))?
             {
                 debug!(
                     "keeping {} because it is the latest layer",
                     l.filename().file_name()
                 );
+                // we can not remove elements immediately during iteration, so collect them in vector
                 let mut to_remove: Vec<Key> = Vec::new();
-                let mut insert_new_range = true;
+                let mut insert_new_range = true; // whether we need to insert new entry or update existed one
 
                 // check if this range overlaps with exited ranges
                 let mut iter = wanted_image_layers.range_mut(..key_range.end);
@@ -3514,6 +3515,8 @@ impl Timeline {
                                 // extend prev range
                                 *prev_end = key_range.end;
                             }
+                            // as ranges in wanted_image_layers do not overlap,
+                            // there can be no ranges overlapping wiht new one
                             break;
                         } else {
                             to_remove.push(*prev_start);
@@ -3522,9 +3525,10 @@ impl Timeline {
                             }
                         }
                     } else {
-                        break;
+                        break; // there can be no more overlapping ranges
                     }
                 }
+                // remove all ranges intersecting with added one
                 for key in to_remove {
                     wanted_image_layers.remove(&key);
                 }
