@@ -65,6 +65,14 @@
 #include "rusagestub.h"
 #endif
 
+#include "access/clog.h"
+#include "access/commit_ts.h"
+#include "access/heapam.h"
+#include "access/multixact.h"
+#include "access/nbtree.h"
+#include "access/subtrans.h"
+#include "access/syncscan.h"
+#include "access/twophase.h"
 #include "access/xlog.h"
 #include "access/xlog_internal.h"
 #if PG_VERSION_NUM >= 150000
@@ -72,18 +80,37 @@
 #endif
 #include "access/xlogutils.h"
 #include "catalog/pg_class.h"
+#include "commands/async.h"
 #include "libpq/libpq.h"
 #include "libpq/pqformat.h"
 #include "miscadmin.h"
+#include "pgstat.h"
+#include "postmaster/autovacuum.h"
+#include "postmaster/bgworker_internals.h"
+#include "postmaster/bgwriter.h"
 #include "postmaster/postmaster.h"
+#include "replication/logicallauncher.h"
+#include "replication/origin.h"
+#include "replication/slot.h"
+#include "replication/walreceiver.h"
+#include "replication/walsender.h"
 #include "storage/buf_internals.h"
 #include "storage/bufmgr.h"
+#include "storage/dsm.h"
 #include "storage/ipc.h"
+#include "storage/pg_shmem.h"
+#include "storage/pmsignal.h"
+#include "storage/predicate.h"
 #include "storage/proc.h"
+#include "storage/procarray.h"
+#include "storage/procsignal.h"
+#include "storage/sinvaladt.h"
 #include "storage/smgr.h"
+#include "storage/spin.h"
 #include "tcop/tcopprot.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
+#include "utils/snapmgr.h"
 
 #include "inmem_smgr.h"
 
@@ -177,6 +204,7 @@ WalRedoMain(int argc, char *argv[])
 	 * buffers. So let's keep it small (default value is 1024)
 	 */
 	num_temp_buffers = 4;
+	NBuffers = 4;
 
 	/*
 	 * install the simple in-memory smgr
@@ -184,27 +212,16 @@ WalRedoMain(int argc, char *argv[])
 	smgr_hook = smgr_inmem;
 	smgr_init_hook = smgr_init_inmem;
 
-	/*
-	 * Validate we have been given a reasonable-looking DataDir and change into it.
-	 */
-	checkDataDir();
-	ChangeToDataDir();
-
-	/*
-	 * Create lockfile for data directory.
-	 */
-	CreateDataDirLockFile(false);
-
-	/* read control file (error checking and contains config ) */
-	LocalProcessControlFile(false);
-
-	/*
-	 * process any libraries that should be preloaded at postmaster start
-	 */
-	process_shared_preload_libraries();
 
 	/* Initialize MaxBackends (if under postmaster, was done already) */
+	MaxConnections = 1;
+	max_worker_processes = 0;
+	max_parallel_workers = 0;
+	max_wal_senders = 0;
 	InitializeMaxBackends();
+
+	/* Disable lastWrittenLsnCache */
+	lastWrittenLsnCacheSize = 0;
 
 #if PG_VERSION_NUM >= 150000
 	/*
@@ -226,7 +243,146 @@ WalRedoMain(int argc, char *argv[])
 	InitializeWalConsistencyChecking();
 #endif
 
-	CreateSharedMemoryAndSemaphores();
+	/*
+	 * Initialize dummy shmem.
+	 *
+	 * This code follows CreateSharedMemoryAndSemaphores() but manually sets up
+	 * the shmem header and skips few initializations that are not needed for
+	 * WAL redo.
+	 */
+	PGShmemHeader *shim = NULL;
+	{
+		PGShmemHeader *hdr;
+		Size size = 10*1048576; // 20 mb. Default nbuffers are 1024, so 8mb shmem
+
+		hdr = (PGShmemHeader *) malloc(size);
+		if (!hdr)
+			ereport(ERROR,
+					(errcode(ERRCODE_OUT_OF_MEMORY),
+					errmsg("[neon-wal-redo] can't allocate (pseudo-) shared memory")));
+
+		hdr->creatorPID = getpid();
+		hdr->magic = PGShmemMagic;
+		hdr->dsm_control = 0;
+		hdr->device = 42; // not relevant for non-shared memory
+		hdr->inode = 424242; // not relevant for non-shared memory
+		hdr->totalsize = size;
+		hdr->freeoffset = MAXALIGN(sizeof(PGShmemHeader));
+
+		shim = hdr;
+		UsedShmemSegAddr = hdr;
+		UsedShmemSegID = (unsigned long) 42;
+
+		InitShmemAccess(hdr);
+
+		/*
+		 * We should avoid semaphores as well to avoid any clean up problems.
+		 * But that is probably easir on a build level by providing stub PGSemaphoreLock() 
+		 * versions.
+		 *
+		 * XXX: reserve semaphores uses dir name as a source of entropy. Fix needed.
+		 */
+		DataDir = "/tmp";
+		PGReserveSemaphores(300);
+
+		/*
+		 * The rest of function follows CreateSharedMemoryAndSemaphores() closely,
+		 * skipped parts are marked with comments.
+		 *
+		 * We also could be way more aggressive and skip more initialization to save
+		 * more memore, but let's check that the current approach works first.
+		 */
+		InitShmemAllocation();
+
+		/*
+		 * Now initialize LWLocks, which do shared memory allocation and are
+		 * needed for InitShmemIndex.
+		 */
+		CreateLWLocks();
+
+		/*
+		 * Set up shmem.c index hashtable
+		 */
+		InitShmemIndex();
+
+		dsm_shmem_init();
+
+		/*
+		 * Set up xlog, clog, and buffers
+		 */
+		XLOGShmemInit();
+		CLOGShmemInit();
+		CommitTsShmemInit();
+		SUBTRANSShmemInit();
+		MultiXactShmemInit();
+		InitBufferPool();
+
+		/*
+		 * Set up lock manager
+		 */
+		InitLocks();
+
+		/*
+		 * Set up predicate lock manager
+		 */
+		InitPredicateLocks();
+
+		/*
+		 * Set up process table
+		 */
+		if (!IsUnderPostmaster)
+			InitProcGlobal();
+		CreateSharedProcArray();
+		CreateSharedBackendStatus();
+		TwoPhaseShmemInit();
+		BackgroundWorkerShmemInit();
+
+		/*
+		 * Set up shared-inval messaging
+		 */
+		CreateSharedInvalidationState();
+
+		/*
+		 * Set up interprocess signaling mechanisms
+		 */
+		PMSignalShmemInit();
+		ProcSignalShmemInit();
+		CheckpointerShmemInit();
+		AutoVacuumShmemInit();
+		ReplicationSlotsShmemInit();
+		ReplicationOriginShmemInit();
+		WalSndShmemInit();
+		WalRcvShmemInit();
+		PgArchShmemInit();
+		ApplyLauncherShmemInit();
+
+		/*
+		 * Set up other modules that need some shared memory space
+		 */
+		SnapMgrInit();
+		BTreeShmemInit();
+		SyncScanShmemInit();
+		/* AsyncShmemInit(); -- skip due to 'pg_notify' directory check */
+
+	#ifdef EXEC_BACKEND
+
+		/*
+		* Alloc the win32 shared backend array
+		*/
+		if (!IsUnderPostmaster)
+			ShmemBackendArrayAllocation();
+	#endif
+
+		/* Initialize dynamic shared memory facilities. */
+		if (!IsUnderPostmaster)
+			dsm_postmaster_startup(shim);
+
+		/*
+		 * Now give loadable modules a chance to set up their shmem allocations
+		 */
+		if (shmem_startup_hook)
+			shmem_startup_hook();
+	}
 
 	/*
 	 * Remember stand-alone backend startup time,roughly at the same point

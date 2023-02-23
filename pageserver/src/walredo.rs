@@ -23,23 +23,21 @@ use bytes::{BufMut, Bytes, BytesMut};
 use nix::poll::*;
 use serde::Serialize;
 use std::collections::VecDeque;
-use std::fs::OpenOptions;
+use std::io;
 use std::io::prelude::*;
 use std::io::{Error, ErrorKind};
 use std::ops::{Deref, DerefMut};
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::prelude::CommandExt;
-use std::path::PathBuf;
 use std::process::Stdio;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 use std::time::Instant;
-use std::{fs, io};
 use tracing::*;
-use utils::crashsafe::path_with_suffix_extension;
 use utils::{bin_ser::BeSer, id::TenantId, lsn::Lsn, nonblock::set_nonblock};
 
+use crate::config::PageServerConf;
 use crate::metrics::{
     WAL_REDO_BYTES_HISTOGRAM, WAL_REDO_RECORDS_HISTOGRAM, WAL_REDO_RECORD_COUNTER, WAL_REDO_TIME,
     WAL_REDO_WAIT_TIME,
@@ -48,7 +46,6 @@ use crate::pgdatadir_mapping::{key_to_rel_block, key_to_slru_block};
 use crate::repository::Key;
 use crate::task_mgr::BACKGROUND_RUNTIME;
 use crate::walrecord::NeonWalRecord;
-use crate::{config::PageServerConf, TEMP_FILE_SUFFIX};
 use pageserver_api::reltag::{RelTag, SlruKind};
 use postgres_ffi::pg_constants;
 use postgres_ffi::relfile_utils::VISIBILITYMAP_FORKNUM;
@@ -634,26 +631,6 @@ impl PostgresRedoManager {
         input: &mut MutexGuard<Option<ProcessInput>>,
         pg_version: u32,
     ) -> Result<(), Error> {
-        // FIXME: We need a dummy Postgres cluster to run the process in. Currently, we
-        // just create one with constant name. That fails if you try to launch more than
-        // one WAL redo manager concurrently.
-        let datadir = path_with_suffix_extension(
-            self.conf
-                .tenant_path(&self.tenant_id)
-                .join("wal-redo-datadir"),
-            TEMP_FILE_SUFFIX,
-        );
-
-        // Create empty data directory for wal-redo postgres, deleting old one first.
-        if datadir.exists() {
-            info!("old temporary datadir {datadir:?} exists, removing");
-            fs::remove_dir_all(&datadir).map_err(|e| {
-                Error::new(
-                    e.kind(),
-                    format!("Old temporary dir {datadir:?} removal failure: {e}"),
-                )
-            })?;
-        }
         let pg_bin_dir_path = self
             .conf
             .pg_bin_dir(pg_version)
@@ -662,35 +639,6 @@ impl PostgresRedoManager {
             .conf
             .pg_lib_dir(pg_version)
             .map_err(|e| Error::new(ErrorKind::Other, format!("incorrect pg_lib_dir path: {e}")))?;
-
-        info!("running initdb in {}", datadir.display());
-        let initdb = Command::new(pg_bin_dir_path.join("initdb"))
-            .args(["-D", &datadir.to_string_lossy()])
-            .arg("-N")
-            .env_clear()
-            .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path) // macOS
-            .close_fds()
-            .output()
-            .map_err(|e| Error::new(e.kind(), format!("failed to execute initdb: {e}")))?;
-
-        if !initdb.status.success() {
-            return Err(Error::new(
-                ErrorKind::Other,
-                format!(
-                    "initdb failed\nstdout: {}\nstderr:\n{}",
-                    String::from_utf8_lossy(&initdb.stdout),
-                    String::from_utf8_lossy(&initdb.stderr)
-                ),
-            ));
-        } else {
-            // Limit shared cache for wal-redo-postgres
-            let mut config = OpenOptions::new()
-                .append(true)
-                .open(PathBuf::from(&datadir).join("postgresql.conf"))?;
-            config.write_all(b"shared_buffers=128kB\n")?;
-            config.write_all(b"fsync=off\n")?;
-        }
 
         // Start postgres itself
         let child = Command::new(pg_bin_dir_path.join("postgres"))
@@ -701,7 +649,6 @@ impl PostgresRedoManager {
             .env_clear()
             .env("LD_LIBRARY_PATH", &pg_lib_dir_path)
             .env("DYLD_LIBRARY_PATH", &pg_lib_dir_path)
-            .env("PGDATA", &datadir)
             // The redo process is not trusted, and runs in seccomp mode that
             // doesn't allow it to open any files. We have to also make sure it
             // doesn't inherit any file descriptors from the pageserver, that
