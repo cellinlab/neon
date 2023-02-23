@@ -13,6 +13,46 @@ pub struct KeySpace {
 }
 
 impl KeySpace {
+    /// Return intersection of the specified range with key space. If no intersection is found then returned
+    // range will have end<=start
+    pub fn intersect(&self, key_range: &Range<Key>) -> Range<Key> {
+        let start = match self
+            .ranges
+            .binary_search_by_key(&key_range.start, |range| range.start)
+        {
+            Ok(_) => key_range.start, // key is start of range
+            Err(index) => {
+                if index != 0 && self.ranges[index - 1].end > key_range.start {
+                    // key belongs to prev range
+                    key_range.start
+                } else if index < self.ranges.len() {
+                    // exists next range
+                    self.ranges[index].start
+                } else {
+                    Key::MAX
+                }
+            }
+        };
+        let end = match self
+            .ranges
+            .binary_search_by_key(&key_range.end, |range| range.end)
+        {
+            Ok(_) => key_range.end, // key is end of range
+            Err(index) => {
+                if index < self.ranges.len() && self.ranges[index].start <= key_range.end {
+                    // key belongs to next range
+                    key_range.end
+                } else if index != 0 {
+                    // exists prev range
+                    self.ranges[index - 1].end
+                } else {
+                    Key::MIN
+                }
+            }
+        };
+        start..end
+    }
+
     ///
     /// Partition a key space into roughly chunks of roughly 'target_size' bytes
     /// in each partition.

@@ -444,7 +444,7 @@ impl Timeline {
             .map(|ancestor| ancestor.timeline_id)
     }
 
-    /// Lock and get timeline's GC cuttof
+    /// Lock and get timeline's GC cutoff
     pub fn get_latest_gc_cutoff_lsn(&self) -> RcuReadGuard<Lsn> {
         self.latest_gc_cutoff_lsn.read()
     }
@@ -3308,7 +3308,7 @@ impl Timeline {
     /// within a layer file. We can only remove the whole file if it's fully
     /// obsolete.
     ///
-    pub(super) async fn gc(&self) -> anyhow::Result<GcResult> {
+    pub(super) async fn gc(&self, ctx: &RequestContext) -> anyhow::Result<GcResult> {
         let timer = self.metrics.garbage_collect_histo.start_timer();
 
         fail_point!("before-timeline-gc");
@@ -3338,6 +3338,7 @@ impl Timeline {
                 pitr_cutoff,
                 retain_lsns,
                 new_gc_cutoff,
+                ctx,
             )
             .instrument(
                 info_span!("gc_timeline", timeline = %self.timeline_id, cutoff = %new_gc_cutoff),
@@ -3357,6 +3358,7 @@ impl Timeline {
         pitr_cutoff: Lsn,
         retain_lsns: Vec<Lsn>,
         new_gc_cutoff: Lsn,
+        ctx: &RequestContext,
     ) -> anyhow::Result<GcResult> {
         let now = SystemTime::now();
         let mut result: GcResult = GcResult::default();
@@ -3403,6 +3405,7 @@ impl Timeline {
 
         let mut layers_to_remove = Vec::new();
         let mut wanted_image_layers: BTreeMap<Key, Key> = BTreeMap::new();
+        let keyspace = self.collect_keyspace(pitr_cutoff, ctx).await?;
 
         // Scan all layers in the timeline (remote or on-disk).
         //
@@ -3479,8 +3482,18 @@ impl Timeline {
             // If GC horizon is at 2500, we can remove layers A and B, but
             // we cannot remove C, even though it's older than 2500, because
             // the delta layer 2000-3000 depends on it.
-            if !layers
-                .image_layer_exists(&l.get_key_range(), &(l.get_lsn_range().end..new_gc_cutoff))?
+            //
+            // If some relation is dropped then it doesn't belong to keyspace any more and
+            // compaction will not generate image layers for it. It prevents GC from deleting layers
+            // of this relation. This is why intersect target keyspace with keyspace at the moment of cutoff.
+            // If dropped relation is inside key range, then it is not a problem, because generated image layer will
+            // cover it.
+            //
+            let mut key_range = l.get_key_range();
+            key_range = keyspace.intersect(&key_range);
+
+            if key_range.is_empty() || // all keys from this layer are dropped before cutoff
+				!layers.image_layer_exists(&key_range, &(l.get_lsn_range().end..new_gc_cutoff))?
             {
                 debug!(
                     "keeping {} because it is the latest layer",
@@ -3488,26 +3501,24 @@ impl Timeline {
                 );
                 let mut to_remove: Vec<Key> = Vec::new();
                 let mut insert_new_range = true;
-                let start = l.get_key_range().start;
-                let mut end = l.get_key_range().end;
 
                 // check if this range overlaps with exited ranges
-                let mut iter = wanted_image_layers.range_mut(..end);
+                let mut iter = wanted_image_layers.range_mut(..key_range.end);
                 while let Some((prev_start, prev_end)) = iter.next_back() {
-                    if *prev_end >= start {
+                    if *prev_end >= key_range.start {
                         // two ranges overlap
-                        if *prev_start <= start {
+                        if *prev_start <= key_range.start {
                             // combine with prev range
                             insert_new_range = false;
-                            if *prev_end < end {
+                            if *prev_end < key_range.end {
                                 // extend prev range
-                                *prev_end = end;
+                                *prev_end = key_range.end;
                             }
                             break;
                         } else {
                             to_remove.push(*prev_start);
-                            if *prev_end > end {
-                                end = *prev_end;
+                            if *prev_end > key_range.end {
+                                key_range.end = *prev_end;
                             }
                         }
                     } else {
@@ -3518,7 +3529,7 @@ impl Timeline {
                     wanted_image_layers.remove(&key);
                 }
                 if insert_new_range {
-                    wanted_image_layers.insert(start, end);
+                    wanted_image_layers.insert(key_range.start, key_range.end);
                 }
                 result.layers_not_updated += 1;
                 continue 'outer;
